@@ -1,0 +1,70 @@
+@startuml c4-component-rates-callcenter
+!include <C4/C4_Component>
+
+title Банк «Стандарт». Передача депозитных ставок в кол-центры\nДиаграмма компонентов (C4, уровень 3): сервис выгрузки ставок и модуль «Ставки по депозитам» системы КЦ
+
+LAYOUT_TOP_DOWN()
+
+Person(cc_operator, "Оператор КЦ банка")
+Person(it_duty, "Дежурный IT")
+
+ContainerQueue(kafka, "Apache Kafka", "из MVP", "Топик deposit.rates: полный набор действующих базовых ставок")
+
+Container_Boundary(exporter, "Сервис выгрузки ставок (новый, Java 17, Spring Boot)") {
+    Component(exp_consumer, "Получатель ставок", "Spring Kafka", "Читает deposit.rates, сохраняет последний снимок ставок")
+    Component(exp_scheduler, "Планировщик", "Spring Scheduler", "Ежедневный запуск выгрузки в 08:00")
+    Component(exp_admin, "API администрирования", "Spring Web, REST", "Ручной повторный запуск выгрузки")
+    Component(exp_builder, "Формирователь файла", "Java, Apache Commons CSV", "CSV (UTF-8) с полным снимком ставок по версии формата; файл SHA-256")
+    Component(exp_uploader, "Отправитель на SFTP", "Spring Integration SFTP", "Кладёт CSV и SHA-256 в папку партнёра; повторы при сбое")
+    Component(exp_metrics, "Метрики и журнал", "Spring Boot Actuator, Micrometer", "Время и результат каждой выгрузки")
+    ComponentDb(exp_db, "БД выгрузок", "PostgreSQL", "Последний снимок ставок, журнал выгрузок")
+}
+
+System_Boundary(cc, "Система КЦ банка (платформа подрядчика)") {
+    Container(cc_web, "Веб-интерфейс оператора", "React.js, существующий", "Рабочее место оператора КЦ")
+    Container_Boundary(cc_ext, "Модуль-расширение «Ставки по депозитам» (новый, Java Spring Boot + React)") {
+        Component(cc_panel, "Панель «Ставки по депозитам»", "React.js", "Виджет в интерфейсе оператора: продукт, срок, суммы, ставка, дата начала действия")
+        Component(cc_api, "API ставок", "Spring Web, REST", "Отдаёт панели актуальные ставки")
+        Component(cc_consumer, "Получатель ставок", "Spring Kafka", "Читает deposit.rates и заменяет сохранённую версию ставок")
+        Component(cc_repo, "Хранилище ставок", "Spring Data JPA", "Чтение и запись ставок в БД системы КЦ")
+        Component(cc_metrics, "Метрики", "Micrometer", "Время последнего обновления ставок")
+    }
+    ContainerDb(cc_db, "БД системы КЦ", "PostgreSQL, существующая", "Новая таблица ставок")
+}
+
+System(sftp, "SFTP-сервер банка", "Новый, в DMZ. Папка партнёра: только чтение, вход по SSH-ключу, белый список IP")
+System_Ext(partner_cc, "Система партнёрского КЦ", "Внешняя")
+System(monitoring, "Система мониторинга", "Сбор метрик, проверка забора файлов, оповещения")
+
+' --- Сервис выгрузки
+Rel(kafka, exp_consumer, "UC4: deposit.rates", "Kafka, TLS")
+Rel(exp_consumer, exp_db, "Сохраняет снимок", "JDBC")
+Rel(exp_consumer, exp_builder, "UC4: ставки изменились")
+Rel(exp_scheduler, exp_builder, "UC5: 08:00")
+Rel(exp_admin, exp_builder, "UC8: повторная выгрузка")
+Rel(exp_builder, exp_db, "Читает снимок", "JDBC")
+Rel(exp_builder, exp_uploader, "CSV + SHA-256")
+Rel(exp_uploader, sftp, "UC4, UC5: put", "SFTP, SSH-ключ")
+Rel(exp_uploader, exp_metrics, "Результат выгрузки")
+Rel(exp_metrics, exp_db, "Журнал выгрузок", "JDBC")
+Rel(partner_cc, sftp, "UC6: get", "SFTP, SSH-ключ")
+
+' --- Модуль системы КЦ
+Rel(kafka, cc_consumer, "UC2: deposit.rates", "Kafka, TLS")
+Rel(cc_consumer, cc_repo, "UC2: новая версия ставок")
+Rel(cc_repo, cc_db, "", "JDBC")
+Rel(cc_consumer, cc_metrics, "Время обновления")
+Rel(cc_operator, cc_web, "UC3", "HTTPS")
+Rel(cc_web, cc_panel, "Встраивает виджет")
+Rel(cc_panel, cc_api, "UC3: GET /rates", "HTTPS/REST")
+Rel(cc_api, cc_repo, "Читает ставки")
+
+' --- Мониторинг
+Rel(monitoring, exp_metrics, "UC8: метрики выгрузок", "HTTPS")
+Rel(monitoring, cc_metrics, "UC8: время обновления ставок", "HTTPS")
+Rel(monitoring, sftp, "UC8: журнал забора файлов", "syslog")
+Rel(monitoring, it_duty, "UC8: оповещение")
+Rel(it_duty, exp_admin, "UC8: перезапуск выгрузки", "HTTPS/REST")
+
+SHOW_LEGEND()
+@enduml
