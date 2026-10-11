@@ -1,0 +1,89 @@
+@startuml c4-container-deposit-mvp
+!include <C4/C4_Container>
+
+title Банк «Стандарт». Открытие депозитов онлайн (MVP)\nДиаграмма контейнеров (C4, уровень 2): детализация интернет-банка и АБС
+
+LAYOUT_TOP_DOWN()
+
+Person(prospect, "Потенциальный клиент")
+Person(client, "Клиент банка")
+Person(cc_operator, "Оператор КЦ")
+Person(front, "Сотрудник отделения")
+Person(back_dep, "Бэк-офис депозитов")
+Person(back_cred, "Бэк-офис кредитов")
+
+System(site, "Сайт", "PHP + React.js")
+
+System_Boundary(ib, "Интернет-банк") {
+    Container(gw, "Балансировщик и API-шлюз", "GSLB + Nginx", "TLS, распределение запросов между ЦОД и экземплярами, проверка токена, ограничение частоты запросов")
+    Container(ib_core, "Монолит ИБ (существующий)", "ASP.NET MVC 4.5", "Вход, платежи, текущие счета. Встраивает раздел «Депозиты» и выдаёт токен новым сервисам")
+    ContainerDb(ib_core_db, "БД ИБ (существующая)", "MS SQL")
+    Container(dep_ui, "Раздел «Депозиты»", "React.js, дизайн-система банка", "Каталог, персональные ставки, форма заявки, статус заявки")
+    Container(catalog, "Сервис продуктов и ставок", ".NET 8", "Каталог продуктов, базовые и персональные ставки из кэша")
+    ContainerDb(catalog_db, "БД ставок", "MS SQL", "Копия ставок и персональных предложений из АБС")
+    Container(app_svc, "Сервис заявок", ".NET 8", "Заявки из ИБ и с сайта, статусы, идемпотентность, Outbox")
+    ContainerDb(app_db, "БД заявок", "MS SQL", "Заявки, статусы, Outbox")
+    Container(otp, "Сервис СМС-кодов", ".NET 8", "Генерация и проверка одноразовых кодов")
+    Container(notify, "Сервис уведомлений", ".NET 8", "СМС о подтверждении ставки и открытии депозита")
+}
+
+ContainerQueue(kafka, "Apache Kafka", "Кластер в двух ЦОД", "deposit.rates, deposit.offers, deposit.applications, deposit.leads, deposit.application-status")
+
+System_Boundary(abs, "АБС") {
+    Container(abs_adapter, "Адаптер АБС", "Java 17, Spring Boot", "Забирает заявки из Kafka с ограничением скорости; публикует события из Outbox АБС")
+    Container(abs_client, "Клиент АБС", "Delphi", "Новые формы: справочник ставок, согласование, очередь онлайн-заявок")
+    Container(abs_rates, "Модуль ставок и согласования", "PL/SQL", "Базовые и персональные ставки, согласование с разделением ролей депозитов и кредитов")
+    Container(abs_deposits, "Модуль депозитов", "PL/SQL", "Онлайн-заявки, подтверждение условий, открытие депозита")
+    ContainerDb(abs_db, "БД АБС", "Oracle", "Счета, депозиты, ставки, заявки, Outbox")
+}
+
+System(cc, "Система кол-центра", "Java Spring Boot. Новый модуль-расширение «Заявки на депозит»")
+System_Ext(sms_gw, "СМС-шлюз", "Телеком-оператор")
+
+' --- Клиенты и сайт
+Rel(prospect, site, "UC2, UC3", "HTTPS")
+Rel(client, gw, "UC6, UC7, UC9", "HTTPS")
+Rel(site, gw, "UC2: ставки; UC3: заявка", "HTTPS/REST")
+
+' --- Интернет-банк
+Rel(gw, ib_core, "Страницы ИБ", "HTTPS")
+Rel(ib_core, ib_core_db, "", "SQL")
+Rel(ib_core, dep_ui, "Встраивает, передаёт токен")
+Rel(dep_ui, gw, "API депозитов", "HTTPS/REST")
+Rel(gw, catalog, "UC2, UC6: каталог и ставки", "REST")
+Rel(gw, app_svc, "UC3, UC7: заявка; UC9: статус", "REST")
+Rel(gw, otp, "UC7: код", "REST")
+Rel(catalog, catalog_db, "", "SQL")
+Rel(app_svc, app_db, "", "SQL")
+Rel(app_svc, otp, "UC7: проверка кода", "REST")
+Rel(otp, sms_gw, "UC7: СМС с кодом", "HTTPS")
+Rel(notify, sms_gw, "UC9: уведомления", "HTTPS")
+
+' --- Kafka
+Rel(app_svc, kafka, "UC3: deposit.leads; UC7: deposit.applications", "TLS")
+Rel(kafka, app_svc, "UC9: deposit.application-status", "TLS")
+Rel(kafka, catalog, "UC1: deposit.rates, deposit.offers", "TLS")
+Rel(kafka, notify, "UC9: deposit.application-status", "TLS")
+Rel(kafka, cc, "UC3: deposit.leads; deposit.rates", "TLS")
+
+' --- АБС
+Rel(kafka, abs_adapter, "UC8: deposit.applications", "TLS")
+Rel(abs_adapter, kafka, "UC1: ставки; UC8: статусы", "TLS")
+Rel(abs_adapter, abs_deposits, "UC8: регистрация заявки", "JDBC, PL/SQL")
+Rel(abs_adapter, abs_db, "Чтение Outbox", "JDBC")
+Rel(abs_client, abs_rates, "UC1, UC4")
+Rel(abs_client, abs_deposits, "UC5, UC8")
+Rel(abs_deposits, abs_rates, "Ставка по заявке")
+Rel(abs_rates, abs_db, "", "SQL")
+Rel(abs_deposits, abs_db, "", "SQL")
+Rel(back_cred, abs_client, "UC1: оценка риска")
+Rel(back_dep, abs_client, "UC1, UC4, UC8")
+Rel(front, abs_client, "UC5")
+
+' --- Кол-центр
+Rel(cc_operator, cc, "UC4")
+Rel(cc, abs_deposits, "UC4: обращение на особые условия (существующая интеграция)")
+Rel(abs_deposits, sms_gw, "UC4: СМС по обращению из КЦ (существующая функция)")
+
+SHOW_LEGEND()
+@enduml
