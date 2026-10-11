@@ -1,0 +1,40 @@
+@startuml c4-context-rates-callcenter
+!include <C4/C4_Context>
+
+title Банк «Стандарт». Передача депозитных ставок в кол-центры\nДиаграмма контекста (C4, уровень 1)
+
+LAYOUT_TOP_DOWN()
+
+Person(back_dep, "Бэк-офис депозитов", "Утверждает ставки в АБС")
+Person(client, "Клиент", "Звонит, чтобы уточнить условия депозита")
+Person(cc_operator, "Оператор КЦ банка", "Консультирует по ставкам")
+Person_Ext(partner_operator, "Оператор партнёрского КЦ", "Консультирует по ставкам по скрипту банка")
+Person(it_duty, "Дежурный IT", "Реагирует на оповещения")
+
+System(abs, "АБС", "Модуль ставок (из MVP): единственный источник ставок")
+System(kafka, "Интеграционная шина", "Apache Kafka, топик deposit.rates (из MVP)")
+System(cc, "Система КЦ банка", "Платформа подрядчика. Модуль-расширение «Ставки по депозитам»")
+System(exporter, "Сервис выгрузки ставок", "Новый. Формирует CSV-файл со ставками для партнёра")
+System(sftp, "SFTP-сервер банка", "Новый, в DMZ. Папка партнёра, доступ только на чтение")
+System(monitoring, "Система мониторинга", "Контроль выгрузки, забора файла и актуальности ставок")
+System_Ext(partner_cc, "Система партнёрского КЦ", "Внешняя система партнёра. Работает только с файлами")
+
+Rel(back_dep, abs, "UC1: утверждает ставки", "Delphi-клиент")
+Rel(abs, kafka, "UC1: публикует ставки (через адаптер АБС)", "Kafka, TLS")
+Rel(kafka, cc, "UC2: ставки", "Kafka, TLS")
+Rel(kafka, exporter, "UC4: ставки", "Kafka, TLS")
+Rel(exporter, sftp, "UC4, UC5: кладёт CSV + SHA-256", "SFTP, SSH-ключ")
+Rel(partner_cc, sftp, "UC6: забирает файл", "SFTP, SSH-ключ, белый список IP")
+
+Rel(client, cc_operator, "UC3: звонок")
+Rel(client, partner_operator, "UC7: звонок")
+Rel(cc_operator, cc, "UC3: смотрит панель ставок", "HTTPS")
+Rel(partner_operator, partner_cc, "UC7: смотрит ставки")
+
+Rel(monitoring, exporter, "UC8: статус выгрузок")
+Rel(monitoring, sftp, "UC8: журнал забора файлов")
+Rel(monitoring, cc, "UC8: время обновления ставок")
+Rel(monitoring, it_duty, "UC8: оповещение")
+
+SHOW_LEGEND()
+@enduml
